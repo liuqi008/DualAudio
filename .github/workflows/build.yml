@@ -1,4 +1,4 @@
-name: Build DualAudio (SDK shim with NAudio)
+ame: Build DualAudio (SDK shim with NAudio)
 
 on:
   workflow_dispatch:
