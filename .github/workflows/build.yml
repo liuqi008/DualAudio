@@ -1,0 +1,50 @@
+name: Build DualAudio
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            7.0.x
+            6.0.x
+
+      # 如果仓库里有 .sln 或 .csproj，会自动用 dotnet 编译
+      - name: Build (auto-detect project)
+        shell: pwsh
+        run: |
+          $proj = (Get-ChildItem -Recurse -Include *.sln,*.csproj | Select-Object -First 1)
+          if ($null -ne $proj) {
+            Write-Host "Found project: $($proj.FullName)"
+            dotnet restore "$($proj.FullName)"
+            dotnet build "$($proj.FullName)" -c Release
+          } else {
+            Write-Host "No .sln/.csproj found; skipping dotnet build."
+            exit 0
+          }
+
+      - name: Collect build outputs
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          Get-ChildItem -Recurse -Include *.exe,*.dll,*.pdb |
+            Where-Object { $_.FullName -match '\\bin\\Release\\' } |
+            Copy-Item -Destination artifacts -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DualAudio-build
+          path: artifacts
