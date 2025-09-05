@@ -1,4 +1,4 @@
-name: Build DualAudio
+name: Build DualAudio (.NET 4.8 retarget)
 
 on:
   workflow_dispatch:
@@ -9,11 +9,12 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup .NET
+      - name: Setup .NET SDK
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: |
@@ -21,21 +22,35 @@ jobs:
             7.0.x
             6.0.x
 
-      # 如果仓库里有 .sln 或 .csproj，会自动用 dotnet 编译
+      # 关键：把所有 .csproj 从 v2.0 升到 v4.8（Windows Runner 自带 4.8 引用程序集）
+      - name: Retarget to .NET Framework 4.8
+        shell: pwsh
+        run: |
+          $csprojs = Get-ChildItem -Recurse -Filter *.csproj
+          foreach ($p in $csprojs) {
+            $text = Get-Content $p.FullName -Raw
+            $text = $text -replace '<TargetFrameworkVersion>v2\.0</TargetFrameworkVersion>', '<TargetFrameworkVersion>v4.8</TargetFrameworkVersion>'
+            if ($text -notmatch '<TargetFrameworkVersion>') {
+              # 若项目中没有该节点，可补一个（保守做法，一般不会用到）
+              $text = $text -replace '</PropertyGroup>', "<TargetFrameworkVersion>v4.8</TargetFrameworkVersion>`n</PropertyGroup>"
+            }
+            # 某些旧项目需要显式空 Profile 节点
+            if ($text -notmatch '<TargetFrameworkProfile>') {
+              $text = $text -replace '</PropertyGroup>', "<TargetFrameworkProfile></TargetFrameworkProfile>`n</PropertyGroup>"
+            }
+            Set-Content $p.FullName $text -Encoding UTF8
+            Write-Host "Retargeted: $($p.FullName)"
+          }
+
       - name: Build (auto-detect project)
         shell: pwsh
         run: |
           $proj = (Get-ChildItem -Recurse -Include *.sln,*.csproj | Select-Object -First 1)
-          if ($null -ne $proj) {
-            Write-Host "Found project: $($proj.FullName)"
-            dotnet restore "$($proj.FullName)"
-            dotnet build "$($proj.FullName)" -c Release
-          } else {
-            Write-Host "No .sln/.csproj found; skipping dotnet build."
-            exit 0
-          }
+          if ($null -eq $proj) { Write-Error "No .sln/.csproj found."; exit 1 }
+          Write-Host "Found project: $($proj.FullName)"
+          dotnet build "$($proj.FullName)" -c Release /p:PlatformTarget=x64
 
-      - name: Collect build outputs
+      - name: Collect artifacts
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
