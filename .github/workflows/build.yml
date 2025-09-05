@@ -21,49 +21,66 @@ jobs:
             7.0.x
             6.0.x
 
-      # 1) 将目标框架从 v2.0 升到 v4.8，并开启绑定重定向
-      - name: Retarget to .NET Framework 4.8 + enable binding redirects
+      # 1) Retarget all csproj to .NET 4.8
+      - name: Retarget to .NET Framework 4.8
         shell: pwsh
         run: |
           $csprojs = Get-ChildItem -Recurse -Filter *.csproj
           foreach ($p in $csprojs) {
             $xml = [xml](Get-Content $p.FullName -Raw)
-
-            # 确保有 PropertyGroup
             $pg = $xml.Project.PropertyGroup | Select-Object -First 1
             if (-not $pg) { $pg = $xml.CreateElement('PropertyGroup'); $xml.Project.AppendChild($pg) | Out-Null }
-
-            # 目标框架 -> v4.8
             if ($pg.TargetFrameworkVersion) { $pg.TargetFrameworkVersion = 'v4.8' }
-            else { $n = $xml.CreateElement('TargetFrameworkVersion'); $n.InnerText = 'v4.8'; $pg.AppendChild($n) | Out-Null }
-
-            # 绑定重定向
+            else {
+              $n = $xml.CreateElement('TargetFrameworkVersion'); $n.InnerText = 'v4.8'; $pg.AppendChild($n) | Out-Null
+            }
             if (-not $pg.AutoGenerateBindingRedirects) { $n=$xml.CreateElement('AutoGenerateBindingRedirects'); $n.InnerText='true'; $pg.AppendChild($n) | Out-Null }
             if (-not $pg.GenerateBindingRedirectsOutputType) { $n=$xml.CreateElement('GenerateBindingRedirectsOutputType'); $n.InnerText='true'; $pg.AppendChild($n) | Out-Null }
-
             $xml.Save($p.FullName)
             Write-Host "Retargeted: $($p.FullName)"
           }
 
-      # 2) 注入 NAudio 的 PackageReference（若尚未添加）
-      - name: Inject NAudio PackageReference if missing
+      # 2) Inject NAudio reference
+      - name: Inject NAudio PackageReference
         shell: pwsh
         run: |
-          $version = '2.2.1'   # 若有兼容性问题，可降到 1.10
+          $version = '2.2.1'
           $csprojs = Get-ChildItem -Recurse -Filter *.csproj
           foreach ($p in $csprojs) {
             $xml = [xml](Get-Content $p.FullName -Raw)
-
-            # 移除可能存在的旧式 <Reference Include="NAudio">（非必须）
-            $refs = $xml.Project.ItemGroup | ForEach-Object { $_.Reference } | Where-Object { $_.Include -like 'NAudio*' }
-            foreach ($r in $refs) { $r.ParentNode.RemoveChild($r) | Out-Null }
-
-            # 确保有一个带 PackageReference 的 ItemGroup
             $pkgGroup = $xml.Project.ItemGroup | Where-Object { $_.PackageReference } | Select-Object -First 1
             if (-not $pkgGroup) {
               $pkgGroup = $xml.CreateElement('ItemGroup')
               $xml.Project.AppendChild($pkgGroup) | Out-Null
             }
-
-            # 如果没有 NAudio 的 PackageReference，则添加
             $hasNAudio = $pkgGroup.PackageReference | Where-Object { $_.Include -eq 'NAudio' }
+            if (-not $hasNAudio) {
+              $pr = $xml.CreateElement('PackageReference')
+              $pr.SetAttribute('Include','NAudio')
+              $ver = $xml.CreateElement('Version'); $ver.InnerText = $version
+              $pr.AppendChild($ver) | Out-Null
+              $pkgGroup.AppendChild($pr) | Out-Null
+              Write-Host "Added PackageReference NAudio $version to $($p.FullName)"
+            }
+            $xml.Save($p.FullName)
+          }
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build x64
+        run: dotnet build -c Release /p:PlatformTarget=x64
+
+      - name: Collect artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          Get-ChildItem -Recurse -Include *.exe,*.dll,*.pdb |
+            Where-Object { $_.FullName -match '\\bin\\Release\\' } |
+            Copy-Item -Destination artifacts -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DualAudio-build
+          path: artifacts
