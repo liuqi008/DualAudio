@@ -1,4 +1,4 @@
-name: Build DualAudio (.NET 4.8 + NAudio, ns-safe)
+name: Build DualAudio (.NET 4.8 + NAudio, no-xpath)
 
 on:
   workflow_dispatch:
@@ -21,6 +21,7 @@ jobs:
             7.0.x
             6.0.x
 
+      # 定位项目文件，写入 PROJ 环境变量
       - name: Locate project file
         shell: pwsh
         run: |
@@ -29,59 +30,77 @@ jobs:
           "PROJ=$($proj.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "Found project: $($proj.FullName)"
 
-      # 仅把 v2.0 -> v4.8；保持原命名空间，不新增可选节点
-      - name: Retarget to .NET Framework 4.8 (namespace-safe)
+      # 仅把 v2.0 -> v4.8；不使用 XPath，避免命名空间问题
+      - name: Retarget to .NET Framework 4.8 (no-xpath)
         shell: pwsh
         run: |
           $csprojs = Get-ChildItem -Recurse -Filter *.csproj
           foreach ($p in $csprojs) {
             $xml = [xml](Get-Content $p.FullName -Raw)
             $ns  = $xml.Project.NamespaceURI
-            $pg  = $xml.Project.PropertyGroup | Select-Object -First 1
+
+            # 确保有一个 PropertyGroup
+            $pg = $xml.Project.PropertyGroup | Select-Object -First 1
             if (-not $pg) {
               $pg = $xml.CreateElement('PropertyGroup', $ns)
-              $xml.Project.AppendChild($pg) | Out-Null
+              [void]$xml.Project.AppendChild($pg)
             }
-            $tfv = $pg.SelectSingleNode('ns:TargetFrameworkVersion', @{ns=$ns})
+
+            # 查找/创建 TargetFrameworkVersion（按 LocalName 避免 XPath）
+            $tfv = $null
+            foreach ($node in $pg.ChildNodes) {
+              if ($node.LocalName -eq 'TargetFrameworkVersion') { $tfv = $node; break }
+            }
             if ($tfv) {
               if ($tfv.InnerText -ne 'v4.8') { $tfv.InnerText = 'v4.8' }
             } else {
               $n = $xml.CreateElement('TargetFrameworkVersion', $ns)
               $n.InnerText = 'v4.8'
-              $pg.AppendChild($n) | Out-Null
+              [void]$pg.AppendChild($n)
             }
+
             $xml.Save($p.FullName)
             Write-Host "Retargeted: $($p.FullName)"
           }
 
-      # 注入 NAudio 的 PackageReference（同一命名空间）
-      - name: Inject NAudio PackageReference (namespace-safe)
+      # 注入 NAudio 的 PackageReference；同样只用 LocalName 处理节点
+      - name: Inject NAudio PackageReference (no-xpath)
         shell: pwsh
         run: |
-          $version = '2.2.1'   # 若不兼容可改 '1.10.0'
+          $version = '2.2.1'   # 如不兼容可改 '1.10.0'
           $csprojs = Get-ChildItem -Recurse -Filter *.csproj
           foreach ($p in $csprojs) {
             $xml = [xml](Get-Content $p.FullName -Raw)
             $ns  = $xml.Project.NamespaceURI
 
-            # 找/创 包引用的 ItemGroup
+            # 找到包含 PackageReference 的 ItemGroup
             $pkgGroup = $null
             foreach ($ig in $xml.Project.ItemGroup) {
-              if ($ig.SelectNodes('ns:PackageReference', @{ns=$ns}).Count -gt 0) { $pkgGroup = $ig; break }
+              foreach ($child in $ig.ChildNodes) {
+                if ($child.LocalName -eq 'PackageReference') { $pkgGroup = $ig; break }
+              }
+              if ($pkgGroup) { break }
             }
             if (-not $pkgGroup) {
               $pkgGroup = $xml.CreateElement('ItemGroup', $ns)
-              $xml.Project.AppendChild($pkgGroup) | Out-Null
+              [void]$xml.Project.AppendChild($pkgGroup)
             }
 
-            # 已有则跳过；没有则添加
-            $has = $pkgGroup.SelectSingleNode('ns:PackageReference[@Include="NAudio"]', @{ns=$ns})
-            if (-not $has) {
-              $pr = $xml.CreateElement('PackageReference', $ns)
-              $pr.SetAttribute('Include','NAudio')
-              $ver = $xml.CreateElement('Version', $ns); $ver.InnerText = $version
-              $pr.AppendChild($ver) | Out-Null
-              $pkgGroup.AppendChild($pr) | Out-Null
+            # 是否已有 NAudio
+            $hasNAudio = $false
+            foreach ($child in $pkgGroup.ChildNodes) {
+              if ($child.LocalName -eq 'PackageReference' -and $child.GetAttribute('Include') -eq 'NAudio') {
+                $hasNAudio = $true; break
+              }
+            }
+
+            if (-not $hasNAudio) {
+              $pr  = $xml.CreateElement('PackageReference', $ns)
+              [void]$pr.SetAttribute('Include','NAudio')
+              $ver = $xml.CreateElement('Version', $ns)
+              $ver.InnerText = $version
+              [void]$pr.AppendChild($ver)
+              [void]$pkgGroup.AppendChild($pr)
               Write-Host "Added NAudio $version to $($p.FullName)"
             }
 
